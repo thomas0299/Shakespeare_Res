@@ -3,8 +3,10 @@ Shared helpers: seeding, parameter counting, training/eval loops.
 """
 
 import math, random, hashlib, torch, numpy as np
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
+
+from tqdm import tqdm
 
 __all__ = ["set_seed", "get_hash", "count_parameters", "run_epoch"]
 
@@ -30,12 +32,12 @@ def run_epoch(
     total_loss = 0.0
 
     with torch.set_grad_enabled(is_train):
-        for X, y in dataloader:
+        for X, y in tqdm(dataloader):
             X, y = X.to(device), y.to(device)
             if is_train:
                 optimizer.zero_grad()
 
-            with autocast(device_type=device.type):
+            with autocast(device_type=device):
                 logits = model(X)
                 loss = criterion(logits, y)
 
