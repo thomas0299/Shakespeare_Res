@@ -63,7 +63,8 @@ print(h)
 
 def main():
     set_seed()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"
 
     # --- Setup File Paths ---
     h_for_hash = h.copy()
@@ -134,13 +135,11 @@ def main():
 
     this_run_training_time = time.time() - total_start_time
 
-    # --- Save Epoch-by-Epoch Results & Checkpoint ---
     results_df = pd.DataFrame(results)
     results_df.to_csv(log_path, index=False)
     total_validation_time = results_df["val_time_s"].sum()
     torch.save(model.state_dict(), ckpt_path)
 
-    # --- N-Gram Evaluation ---
     seed_text = reference_text[: h["SEQ"]]
 
     ngram_results, total_ngram_eval_time = evaluate_ngram_overlap(
@@ -156,7 +155,6 @@ def main():
         temperature=0.8,
     )
 
-    # --- Save Final Summary ---
     save_training_summary(
         summary_path=summary_path,
         h_params=h,
