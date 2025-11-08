@@ -2,16 +2,24 @@
 Lightweight character-level Transformer for comparison.
 """
 
-import math, torch, torch.nn as nn
+import math
+
+import torch
+import torch.nn as nn
 
 __all__ = ["CharTransformer"]
 
+
 class CharTransformer(nn.Module):
-    def __init__(self, vocab_size, embed_size, num_layers, num_heads, hidden_size, seq_len):
+    def __init__(
+        self, vocab_size, embed_size, num_layers, num_heads, hidden_size, seq_len
+    ):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, embed_size)
         self.pos = self._positional_encoding(seq_len, embed_size)
-        enc_layer = nn.TransformerEncoderLayer(embed_size, num_heads, hidden_size, batch_first=True)
+        enc_layer = nn.TransformerEncoderLayer(
+            embed_size, num_heads, hidden_size, batch_first=True
+        )
         self.transformer = nn.TransformerEncoder(enc_layer, num_layers)
         self.fc = nn.Linear(embed_size, vocab_size)
 
@@ -28,4 +36,3 @@ class CharTransformer(nn.Module):
         e = self.embed(x) + self.pos[:T, :].to(x.device)
         h = self.transformer(e)
         return self.fc(h[:, -1, :])  # last position
-

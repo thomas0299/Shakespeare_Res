@@ -22,3 +22,5 @@ results_*.csv
 .idea/
 
 *.csv
+
+nohup.out

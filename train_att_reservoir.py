@@ -2,94 +2,183 @@
 Train attention-enhanced reservoir network on Shakespeare.
 """
 
+import argparse
 import os
-import torch
+import time
+
 import pandas as pd
-from torch.utils.data import DataLoader
+import torch
 from torch import nn, optim
 from torch.cuda.amp import GradScaler
 
-from utils.data_utils import load_corpus, build_vocab, TextDataset
-from utils.training_utils import set_seed, get_hash, count_parameters, run_epoch
+from evaluation import evaluate_ngram_overlap
 from models.att_reservoir import AttReservoirNet
+from utils.data_utils import setup_dataloaders
+from utils.training_utils import (
+    count_parameters,
+    get_hash,
+    load_checkpoint,
+    run_epoch,
+    save_training_summary,
+    set_seed,
+)
 
 # Paths & outputs
-DATA_PATH   = "data/shakespeare.txt"
+DATA_PATH = "data/shakespeare.txt"
 RESULTS_CSV = "results_att_reservoir.csv"
-CKPT_DIR    = "checkpoints"
+CKPT_DIR = "checkpoints"
+LOG_DIR = "training_logs"
+os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(CKPT_DIR, exist_ok=True)
 
-# Base hyperparameters
-BASE = {
+h = {
     "TRAIN_SPLIT": 0.9,
-    "BATCH":       1024,
-    "EPOCHS":      5,
-    "LR":          1e-4,
-    "SEQ":         32,
-    "EMB":         16,
+    "BATCH": 1024,
+    "EPOCHS": 2,
+    "LR": 1e-4,
+    "SEQ": 32,
+    "EMB": 16,
+    "RES": 100,
+    "NUM_RES": 1,
+    "HID": 20,
+    "DEEP_TYPE": "grouped_esn",
 }
 
-# Attention-reservoir sweep configurations
-ATT_CONFIGS = [
-    {"RES": 75,  "HID": 13},
-    {"RES": 75,  "HID": 19},
-    {"RES": 100, "HID": 20},
-    {"RES": 150, "HID": 25},
-    {"RES": 160, "HID": 30},
-]
+parser = argparse.ArgumentParser(
+    description="Train an Attention-Enhanced Reservoir Network."
+)
+parser.add_argument("--EPOCHS", type=int, help="Number of training epochs.")
+parser.add_argument("--LR", type=float, help="Learning rate.")
+parser.add_argument("--BATCH", type=int, help="Batch size.")
+parser.add_argument("--EMB", type=int, help="Embedding size.")
+parser.add_argument("--RES", type=int, help="Reservoir size.")
+parser.add_argument("--NUM_RES", type=int, help="Number of stacked reservoirs.")
+parser.add_argument(
+    "--DEEP_TYPE",
+    type=str,
+    help="Type of deep architecture (deep, deep_input, deep_esn, deep_ia, deep_esn_d, grouped_esn).",
+)
+parser.add_argument("--HID", type=int, help="Hidden size (for attention head).")
+
+args = parser.parse_args()
+
+for key, value in vars(args).items():
+    if value is not None:
+        h[key] = value
+
+print(h)
+
 
 def main():
     set_seed()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Load & split
-    text = load_corpus(DATA_PATH)
-    vocab, c2i, _ = build_vocab(text)
-    split = int(len(text) * BASE["TRAIN_SPLIT"])
-    train_ds = TextDataset(text[:split], BASE["SEQ"], c2i)
-    test_ds  = TextDataset(text[split:], BASE["SEQ"], c2i)
+    # --- Setup File Paths ---
+    h_for_hash = h.copy()
+    h_for_hash.pop("EPOCHS", None)
+    file_name = f"att_{get_hash(h_for_hash)}"  # Changed prefix to 'att_'
 
-    train_dl = DataLoader(train_ds, BASE["BATCH"], shuffle=True,  num_workers=2)
-    test_dl  = DataLoader(test_ds,  BASE["BATCH"], shuffle=False, num_workers=2)
+    ckpt_path = os.path.join(CKPT_DIR, file_name + ".pth")
+    log_path = os.path.join(LOG_DIR, file_name + ".csv")
+    summary_path = os.path.join(LOG_DIR, f"{file_name}_summary.csv")
 
-    all_results = []
+    # --- Setup Data ---
+    train_dl, test_dl, vocab, c2i, i2c, reference_text = setup_dataloaders(
+        DATA_PATH, h["TRAIN_SPLIT"], h["SEQ"], h["BATCH"]
+    )
 
-    for cfg in ATT_CONFIGS:
-        h = dict(BASE, RES=cfg["RES"], HID=cfg["HID"])
-        name = f"att_{get_hash(h)}"
-        print(f"\n=== Training {name} ===")
+    # --- Setup Model ---
+    model = AttReservoirNet(
+        vocab_size=len(vocab),
+        embed_size=h["EMB"],
+        reservoir_size=h["RES"],
+        num_reservoirs=h["NUM_RES"],
+        deep_type=h["DEEP_TYPE"],
+        hidden_size=h["HID"],
+    ).to(device)
+    parameter_count = count_parameters(model)
+    print("Params:", parameter_count)
 
-        model = AttReservoirNet(
-            vocab_size=len(vocab),
-            embed_size=h["EMB"],
-            reservoir_size=h["RES"],
-            hidden_size=h["HID"],
-        ).to(device)
-        print("Trainable parameters:", count_parameters(model))
+    # --- IMPORTANT: This model only trains the 'head' parameters ---
+    opt = optim.Adam(model.head.parameters(), lr=h["LR"])
+    crit = nn.CrossEntropyLoss()
+    scaler = GradScaler()
 
-        optimizer = optim.Adam(model.head.parameters(), lr=h["LR"])
-        criterion = nn.CrossEntropyLoss()
-        scaler    = GradScaler()
+    # --- Load Checkpoint ---
+    model, results, start_epoch, old_total_training_time = load_checkpoint(
+        model, ckpt_path, log_path, summary_path, device
+    )
 
-        for epoch in range(1, h["EPOCHS"] + 1):
-            train_loss = run_epoch(model, train_dl,  criterion, optimizer, scaler, device)
-            test_loss  = run_epoch(model, test_dl,   criterion, None,      None,   device)
-            print(f"[{name}] Epoch {epoch}: train {train_loss:.4f} | test {test_loss:.4f}")
+    # --- Training Loop ---
+    total_start_time = time.time()
+    total_desired_epochs = h["EPOCHS"]
 
-            all_results.append({
-                "model":      name,
-                "epoch":      epoch,
-                "train_loss": train_loss,
-                "test_loss":  test_loss,
-                **h
-            })
+    if start_epoch > total_desired_epochs:
+        print(
+            f"Model already trained for {start_epoch - 1} epochs. Skipping training loop."
+        )
+    else:
+        print(f"Training from epoch {start_epoch} to {total_desired_epochs}...")
+        for epoch in range(start_epoch, total_desired_epochs + 1):
 
-        # Save checkpoint
-        torch.save(model.state_dict(), os.path.join(CKPT_DIR, f"{name}.pth"))
+            train_start_time = time.time()
+            tr = run_epoch(model, train_dl, crit, opt, scaler, device)
+            train_time = time.time() - train_start_time
 
-    # Write CSV
-    pd.DataFrame(all_results).to_csv(RESULTS_CSV, index=False)
+            val_start_time = time.time()
+            te = run_epoch(model, test_dl, crit, None, None, device)
+            val_time = time.time() - val_start_time
+
+            print(
+                f"Epoch {epoch}: train {tr:.4f} ({train_time:.2f}s) | test {te:.4f} ({val_time:.2f}s)"
+            )
+            results.append(
+                {
+                    "epoch": epoch,
+                    "train_loss": tr,
+                    "test_loss": te,
+                    "train_time_s": train_time,
+                    "val_time_s": val_time,
+                }
+            )
+
+    this_run_training_time = time.time() - total_start_time
+
+    # --- Save Epoch-by-Epoch Results & Checkpoint ---
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(log_path, index=False)
+    total_validation_time = results_df["val_time_s"].sum()
+    torch.save(model.state_dict(), ckpt_path)
+
+    # --- N-Gram Evaluation ---
+    seed_text = reference_text[: h["SEQ"]]
+
+    ngram_results, total_ngram_eval_time = evaluate_ngram_overlap(
+        model=model,
+        c2i=c2i,
+        i2c=i2c,
+        reference_text=reference_text,
+        seed_text=seed_text,
+        seq_len=h["SEQ"],
+        device=device,
+        gen_length=20000,
+        n_values=[3, 5, 7, 8],
+        temperature=0.8,
+    )
+
+    # --- Save Final Summary ---
+    save_training_summary(
+        summary_path=summary_path,
+        h_params=h,
+        file_hash=file_name,
+        old_total_training_time=old_total_training_time,
+        this_run_training_time=this_run_training_time,
+        total_validation_time=total_validation_time,
+        total_ngram_eval_time=total_ngram_eval_time,
+        parameter_count=parameter_count,
+        ngram_results=ngram_results,
+    )
+
 
 if __name__ == "__main__":
     main()
-
