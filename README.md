@@ -40,3 +40,5 @@ Each script demonstrates:
 ├── train_att_reservoir.py
 └── train_transformer.py
 
+conda create --name stack-rc python=3.10
+pip install -r requirements.txt
